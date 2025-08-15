@@ -1,4 +1,5 @@
-import { createConnection, Socket } from "net"
+// import { createConnection, Socket } from "net"
+import { USocket } from "usocket"
 import path from "path"
 import { once, EventEmitter } from "events"
 import { readFileSync } from "fs"
@@ -400,7 +401,8 @@ export const open_display = async (
 	if (!spath)
 		throw new Error("wayland socket file not specified");
 
-	const sock = createConnection(spath);
+	// const sock = createConnection(spath);
+	const sock = new USocket(spath);
 	(async () => await once(sock, "connect"))();
 
 	const display = new WlDisplay(sock);
