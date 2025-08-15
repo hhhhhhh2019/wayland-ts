@@ -10,6 +10,7 @@ import { WlObject } from "./object"
 import { WlInterface } from "./interface"
 import type { WlRequest, WlEvent, WlArg, WlEnum, WlEnumEntry } from "./interface"
 import { WlShm } from "./shm"
+import { WlCompositor } from "./compositor"
 
 
 
@@ -170,6 +171,7 @@ export class WlDisplay extends EventEmitter {
 
 	public registry?: WlObject
 	public shm?: WlShm
+	public compositor?: WlCompositor
 
 
 	constructor(sock: Socket) {
@@ -180,8 +182,7 @@ export class WlDisplay extends EventEmitter {
 
 		this.load("/usr/share/wayland/wayland.xml");
 
-		// this.objects.set(1, this.interfaces.find(x => x.name == "wl_display")!);
-		this.register(new WlObject(this, this.interfaces.find(x => x.name == "wl_display")!, 1));
+		this.register(new WlObject(this, this.interface("wl_display")!, 1));
 		this.addListener("1 error", this.on_error);
 		this.addListener("1 delete_id", id => this.objects.delete(id));
 	}
@@ -190,6 +191,7 @@ export class WlDisplay extends EventEmitter {
 	public init = async () => {
 		await this.get_registry();
 		await this.get_shm();
+		await this.get_compositor();
 	}
 
 
@@ -220,7 +222,7 @@ export class WlDisplay extends EventEmitter {
 
 		const header = Buffer.from(new Uint32Array([
 			this.registry!.id,
-			(data.length + 8 << 16) | this.registry!.interface.requests.findIndex(x => x.name == "bind")
+			(data.length + 8 << 16) | this.registry!.interface.request("bind")
 		]).buffer);
 
 		const msg = new Uint8Array(header.length + data.length);
@@ -264,7 +266,7 @@ export class WlDisplay extends EventEmitter {
 	}
 
 
-	private sync = async () => {
+	public sync = async () => {
 		const id = this.new_id();
 
 		this.register(new WlObject(this, this.interface("wl_callback")!, id));
@@ -273,11 +275,71 @@ export class WlDisplay extends EventEmitter {
 
 		this.socket.write(Buffer.from(new Uint32Array([
 			1,
-			(12 << 16) | wl_display_infc.requests.findIndex(x => x.name == "sync"),
+			(12 << 16) | wl_display_infc.request("sync"),
 			id
 		]).buffer));
 
 		await once(this, `${id} done`);
+	}
+
+
+	public request = (id: number, infc: WlInterface, opcode: number, ...values) => {
+		const data = [];
+		let len;
+		let str;
+		let arr;
+
+		let i = 0;
+		for (let a of infc.requests[opcode]!.args) {
+			switch (a.type) {
+				case "int":
+					data.push(Buffer.from(new Int32Array([values[i++]]).buffer));
+					break;
+				case "uint":
+				case "object":
+					data.push(Buffer.from(new Uint32Array([values[i++]]).buffer));
+					break;
+				case "string":
+					str = Buffer.from(values[i++], "utf8");
+					data.push(Buffer.from(new Uint32Array([str.length]).buffer));
+					data.push(str);
+					break;
+				case "new_id":
+					if (a.interface) {
+						data.push(Buffer.from(new Uint32Array([values[i++]]).buffer));
+					} else { // name, version, id
+						len = Math.floor((values[i].length + 1 + 3) / 4) * 4;
+						str = Buffer.alloc(len);
+						str.set(Buffer.from(values[i++] + "\0", "utf8"), 0);
+						data.push(Buffer.from(new Uint32Array([len]).buffer));
+						data.push(str);
+
+						data.push(Buffer.from(new Uint32Array([values[i++]]).buffer));
+						data.push(Buffer.from(new Uint32Array([values[i++]]).buffer));
+					}
+					break;
+				case "array":
+					arr = values[i++];
+					data.push(Buffer.from(new Uint32Array([arr.length]).buffer));
+					data.push(arr);
+
+					break;
+			}
+		}
+
+		const header = Buffer.from(new Uint32Array([
+			id,
+			(data.map(x => x.length).reduce((x, y) => x + y, 0) + 8 << 16) | opcode
+		]).buffer);
+
+		const msg = Buffer.concat([
+			header,
+			...data
+		]);
+
+		// console.log(msg);
+
+		this.socket.write(msg);
 	}
 
 
@@ -317,7 +379,7 @@ export class WlDisplay extends EventEmitter {
 
 		this.socket.write(Buffer.from(new Uint32Array([
 			1,
-			(12 << 16) | wl_display_infc.requests.findIndex(x => x.name == "get_registry"),
+			(12 << 16) | wl_display_infc.request("get_registry"),
 			id
 		]).buffer));
 
@@ -335,6 +397,19 @@ export class WlDisplay extends EventEmitter {
 
 		this.register(this.shm);
 		this.bind(gshm.name, gshm.version, id);
+	}
+
+
+	private get_compositor = async () => {
+		const id = this.new_id();
+		const gcompositor = this.global.find(x => x.infc == "wl_compositor");
+
+		if (!gcompositor) throw new Error("global shm not found!");
+
+		this.compositor = new WlCompositor(this);
+
+		this.register(this.compositor);
+		this.bind(gcompositor.name, gcompositor.version, id);
 	}
 }
 

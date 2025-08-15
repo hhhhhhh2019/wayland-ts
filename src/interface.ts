@@ -71,4 +71,8 @@ export class WlInterface extends EventEmitter {
 		this.events = events;
 		this.enums = enums;
 	}
+
+
+	public request = (name: string) =>
+		this.requests.findIndex(x => x.name == name);
 }
