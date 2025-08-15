@@ -1,0 +1,19 @@
+{
+  "name": "wayland-ts",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun src/client.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@types/node": "^24.2.1",
+    "xml-js": "^1.6.11"
+  }
+}
