@@ -7,7 +7,7 @@ export const readUInt32 =
 	en == "LE" ? b.readUint32LE(offset) : b.readUint32BE(offset);
 
 export const writeUInt32 =
-	(b: Buffer, value: number, offset: number, en: "LE" | "BE" = oen): number =>
+	(b: Buffer, value: number, offset: number, en: "LE" | "BE" = oen) =>
 	en == "LE" ? b.writeUint32LE(value, offset) : b.writeUint32BE(value, offset);
 
 export const readInt32 =
@@ -15,5 +15,12 @@ export const readInt32 =
 	en == "LE" ? b.readInt32LE(offset) : b.readInt32BE(offset);
 
 export const writeInt32 =
-	(b: Buffer, value: number, offset: number, en: "LE" | "BE" = oen): number =>
+	(b: Buffer, value: number, offset: number, en: "LE" | "BE" = oen) =>
 	en == "LE" ? b.writeInt32LE(value, offset) : b.writeInt32BE(value, offset);
+
+export const writeString =
+	(b: Buffer, value: string, offset: number, en: "LE" | "BE" = oen) => {
+	const str = Buffer.from(value + "\0", "utf8");
+	writeUInt32(b, str.length, offset, en);
+	b.set(str, offset + 4);
+}

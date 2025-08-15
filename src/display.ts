@@ -5,9 +5,11 @@ import { readFileSync } from "fs"
 import { xml2js } from "xml-js"
 import type { ElementCompact } from "xml-js"
 
-import { readUInt32, writeUInt32, readInt32 } from "./utils"
+import { readUInt32, writeUInt32, readInt32, writeString } from "./utils"
+import { WlObject } from "./object"
 import { WlInterface } from "./interface"
 import type { WlRequest, WlEvent, WlArg, WlEnum, WlEnumEntry } from "./interface"
+import { WlShm } from "./shm"
 
 
 
@@ -124,7 +126,6 @@ const parse_args = (args: Array<WlArg>, msg: Buffer) => {
 		switch (a["type"]!) {
 			case "uint":
 			case "object":
-			case "new_id":
 			case "enum": // maybe not just int
 				result.push(readUInt32(msg, offset));
 				offset += 4;
@@ -138,7 +139,7 @@ const parse_args = (args: Array<WlArg>, msg: Buffer) => {
 			case "string":
 				len = readUInt32(msg, offset);
 				offset += 4;
-				result.push(msg.subarray(offset, offset + len).toString());
+				result.push(msg.subarray(offset, offset + len - 1).toString());
 				offset += Math.floor((len + 3) / 4) * 4;
 				break;
 
@@ -151,6 +152,9 @@ const parse_args = (args: Array<WlArg>, msg: Buffer) => {
 
 			case "fd":
 				throw new Error("fd argument is not supported");
+
+			case "new_id":
+				throw new Error("unreachable");
 		}
 	}
 
@@ -160,10 +164,12 @@ const parse_args = (args: Array<WlArg>, msg: Buffer) => {
 
 export class WlDisplay extends EventEmitter {
 	private socket: Socket
-	private registry: number = 0
-	private objects: Map<number, WlInterface> = new Map()
+	private objects: Map<number, WlObject> = new Map()
 	private interfaces: WlInterface[] = []
-	private global: {name: number, infc: string, version: number}[] = []
+	public  global: {name: number, infc: string, version: number}[] = []
+
+	public registry?: WlObject
+	public shm?: WlShm
 
 
 	constructor(sock: Socket) {
@@ -174,7 +180,8 @@ export class WlDisplay extends EventEmitter {
 
 		this.load("/usr/share/wayland/wayland.xml");
 
-		this.objects.set(1, this.interfaces.find(x => x.name == "wl_display")!);
+		// this.objects.set(1, this.interfaces.find(x => x.name == "wl_display")!);
+		this.register(new WlObject(this, this.interfaces.find(x => x.name == "wl_display")!, 1));
 		this.addListener("1 error", this.on_error);
 		this.addListener("1 delete_id", id => this.objects.delete(id));
 	}
@@ -182,18 +189,45 @@ export class WlDisplay extends EventEmitter {
 
 	public init = async () => {
 		await this.get_registry();
+		await this.get_shm();
 	}
 
 
-	public bind = (name: number, id: number) => {
-		const infc = this.objects.get(this.registry)!;
+	public interface = (name: string) =>
+		this.interfaces.find(x => x.name == name)
 
-		this.socket.write(Buffer.from(new Uint32Array([
-			this.registry,
-			(16 << 16) | infc.requests.findIndex(x => x.name == "bind"),
-			name,
-			id
-		]).buffer));
+
+	public register = (obj: WlObject) => {
+		this.objects.set(obj.id, obj);
+	}
+
+
+	public bind = (name: number, version: number, id: number) => {
+		const iname = this.global.find(x => x.name == name)!.infc;
+
+		const data = Buffer.from(new Uint8Array(
+			4 + // name
+			4 + // str len
+			Math.floor((iname.length + 3) / 4) * 4 +
+			4 + // version
+			4   // id
+		));
+
+		writeUInt32(data, name, 0);
+		writeString(data, iname, 4);
+		writeUInt32(data, version, data.length - 8);
+		writeUInt32(data, id, data.length - 4);
+
+		const header = Buffer.from(new Uint32Array([
+			this.registry!.id,
+			(data.length + 8 << 16) | this.registry!.interface.requests.findIndex(x => x.name == "bind")
+		]).buffer);
+
+		const msg = new Uint8Array(header.length + data.length);
+		msg.set(header, 0);
+		msg.set(data, header.length);
+
+		this.socket.write(Buffer.from(msg.buffer));
 	}
 
 
@@ -221,46 +255,21 @@ export class WlDisplay extends EventEmitter {
 
 
 	private on_msg = async (id: number, opcode: number, msg: Buffer) => {
-		const args = parse_args(this.objects.get(id)!.events[opcode]!.args, msg);
-		const ev_name = this.objects.get(id)!.events[opcode]!.name;
+		const args = parse_args(this.objects.get(id)!.interface.events[opcode]!.args, msg);
+		const ev_name = this.objects.get(id)!.interface.events[opcode]!.name;
 
-		console.log(`emit ${id} ${ev_name}`);
+		// console.log(`emit ${id} ${ev_name}`);
 
 		this.emit(`${id} ${ev_name}`, ...args);
 	}
 
 
-	private get_registry = async () => {
-		const id = this.new_id();
-
-		this.objects.set(id, this.interfaces.find(x => x.name == "wl_registry")!);
-		this.registry = id;
-
-		const wl_display_infc = this.interfaces.find(x => x.name == "wl_display")!;
-
-		this.addListener(`${id} global`, (name: number, infc: string, version: number) => {
-			this.global.push({name, infc, version});
-		});
-
-		this.addListener(`${id} global_remove`, (name: number) => {
-			delete this.global[this.global.findIndex(x => x.name == name)];
-		});
-
-		this.socket.write(Buffer.from(new Uint32Array([
-			1,
-			(12 << 16) | wl_display_infc.requests.findIndex(x => x.name == "get_registry"),
-			id
-		]).buffer));
-
-		await this.sync();
-	}
-
 	private sync = async () => {
 		const id = this.new_id();
 
-		this.objects.set(id, this.interfaces.find(x => x.name == "wl_callback")!);
+		this.register(new WlObject(this, this.interface("wl_callback")!, id));
 
-		const wl_display_infc = this.interfaces.find(x => x.name == "wl_display")!;
+		const wl_display_infc = this.interface("wl_display")!;
 
 		this.socket.write(Buffer.from(new Uint32Array([
 			1,
@@ -268,7 +277,6 @@ export class WlDisplay extends EventEmitter {
 			id
 		]).buffer));
 
-		// (async () => await once(this, `${id} done`))();
 		await once(this, `${id} done`);
 	}
 
@@ -287,6 +295,46 @@ export class WlDisplay extends EventEmitter {
 		while (ids.includes(id)) {id++};
 
 		return id;
+	}
+
+
+	private get_registry = async () => {
+		const id = this.new_id();
+
+		this.registry = new WlObject(this, this.interface("wl_registry")!, id);
+		this.register(this.registry);
+
+		const wl_display_infc = this.interface("wl_display")!;
+
+		this.addListener(`${id} global`, (name: number, infc: string, version: number) => {
+			console.log(`global ${name} ${infc}`);
+			this.global.push({name, infc, version});
+		});
+
+		this.addListener(`${id} global_remove`, (name: number) => {
+			delete this.global[this.global.findIndex(x => x.name == name)];
+		});
+
+		this.socket.write(Buffer.from(new Uint32Array([
+			1,
+			(12 << 16) | wl_display_infc.requests.findIndex(x => x.name == "get_registry"),
+			id
+		]).buffer));
+
+		await this.sync();
+	}
+
+
+	private get_shm = async () => {
+		const id = this.new_id();
+		const gshm = this.global.find(x => x.infc == "wl_shm");
+
+		if (!gshm) throw new Error("global shm not found!");
+
+		this.shm = new WlShm(this);
+
+		this.register(this.shm);
+		this.bind(gshm.name, gshm.version, id);
 	}
 }
 
