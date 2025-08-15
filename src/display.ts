@@ -205,31 +205,10 @@ export class WlDisplay extends EventEmitter {
 
 
 	public bind = (name: number, version: number, id: number) => {
-		const iname = this.global.find(x => x.name == name)!.infc;
-
-		const data = Buffer.from(new Uint8Array(
-			4 + // name
-			4 + // str len
-			Math.floor((iname.length + 3) / 4) * 4 +
-			4 + // version
-			4   // id
-		));
-
-		writeUInt32(data, name, 0);
-		writeString(data, iname, 4);
-		writeUInt32(data, version, data.length - 8);
-		writeUInt32(data, id, data.length - 4);
-
-		const header = Buffer.from(new Uint32Array([
-			this.registry!.id,
-			(data.length + 8 << 16) | this.registry!.interface.request("bind")
-		]).buffer);
-
-		const msg = new Uint8Array(header.length + data.length);
-		msg.set(header, 0);
-		msg.set(data, header.length);
-
-		this.socket.write(Buffer.from(msg.buffer));
+		this.request(
+			this.registry!.id, this.registry!.interface, this.registry!.interface.request("bind"),
+			name, this.global.find(x => x.name == name)!.infc, version, id
+		);
 	}
 
 
@@ -300,7 +279,7 @@ export class WlDisplay extends EventEmitter {
 					data.push(Buffer.from(new Uint32Array([values[i++]]).buffer));
 					break;
 				case "string":
-					str = Buffer.from(values[i++], "utf8");
+					str = Buffer.from(values[i++] + "\0", "utf8");
 					data.push(Buffer.from(new Uint32Array([str.length]).buffer));
 					data.push(str);
 					break;
@@ -310,8 +289,8 @@ export class WlDisplay extends EventEmitter {
 					} else { // name, version, id
 						len = Math.floor((values[i].length + 1 + 3) / 4) * 4;
 						str = Buffer.alloc(len);
+						data.push(Buffer.from(new Uint32Array([values[i].length + 1]).buffer));
 						str.set(Buffer.from(values[i++] + "\0", "utf8"), 0);
-						data.push(Buffer.from(new Uint32Array([len]).buffer));
 						data.push(str);
 
 						data.push(Buffer.from(new Uint32Array([values[i++]]).buffer));
